@@ -567,6 +567,49 @@ class Media_Double_Check {
 			);
 		}
 
+		// ACF Check (Explicit - PostMeta)
+		if ( ! empty( $settings['acf'] ) ) {
+			$queries[] = $wpdb->prepare(
+				"SELECT 'acf' AS source, pm1.post_id AS item_id, pm1.meta_key AS label, '-' AS subtype, 'ACF Field' AS match_type
+				 FROM {$wpdb->postmeta} pm1
+				 JOIN {$wpdb->postmeta} pm2 ON pm1.post_id = pm2.post_id AND pm2.meta_key = CONCAT('_', pm1.meta_key)
+				 WHERE pm2.meta_value LIKE 'field_%%'
+				 AND (
+				    pm1.meta_value LIKE %s
+				    OR pm1.meta_value = %s
+				    OR pm1.meta_value LIKE %s
+				 )
+				 AND pm1.post_id != %d",
+				$search_filename, (string)$id, $search_id_serialized, $id
+			);
+
+			// ACF Options Pages
+			$queries[] = $wpdb->prepare(
+				"SELECT 'acf' AS source, o1.option_id AS item_id, o1.option_name AS label, 'Option Page' AS subtype, 'ACF Field' AS match_type
+				 FROM {$wpdb->options} o1
+				 JOIN {$wpdb->options} o2 ON o2.option_name = CONCAT('_', o1.option_name)
+				 WHERE o2.option_value LIKE 'field_%%'
+				 AND (
+				    o1.option_value LIKE %s
+				    OR o1.option_value LIKE %s
+				 )",
+				$search_filename, $search_id_serialized
+			);
+
+			// ACF Term Meta
+			$queries[] = $wpdb->prepare(
+				"SELECT 'acf' AS source, tm1.term_id AS item_id, tm1.meta_key AS label, 'Term' AS subtype, 'ACF Field' AS match_type
+				 FROM {$wpdb->termmeta} tm1
+				 JOIN {$wpdb->termmeta} tm2 ON tm1.term_id = tm2.term_id AND tm2.meta_key = CONCAT('_', tm1.meta_key)
+				 WHERE tm2.meta_value LIKE 'field_%%'
+				 AND (
+				    tm1.meta_value = %s
+				    OR tm1.meta_value LIKE %s
+				 )",
+				(string)$id, $search_filename
+			);
+		}
+
 		// Global Meta check if enabled
 		if ( ! empty( $settings['global_meta'] ) ) {
 			$exclude_keys = ! empty( $meta_keys ) ? $meta_keys : [ '' ];

@@ -184,6 +184,7 @@
 .mdc-tag-postmeta { border-color: #86efac; background: #dcfce7; }
 .mdc-tag-options { border-color: #fde047; background: #fef9c3; }
 .mdc-tag-termmeta { border-color: #d8b4fe; background: #f3e8ff; }
+.mdc-tag-acf { border-color: #7dd3fc; background: #e0f2fe; }
 
 .mdc-row-actions {
     display: flex;
