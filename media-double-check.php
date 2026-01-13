@@ -2,17 +2,24 @@
 /**
  * Plugin Name: Media Double Check
  * Description: Double-checks files flagged as "not found" by Media Cleaner using deep search queries.
- * Version: 1.0.0
- * Author: Antigravity
+ * Version: 1.0.1
+ * Author: Rowielokent Matsui <devkenmatsui@gmail.com>
+ * Author URI: https://github.com/RkentMatsui
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
+// Fetch plugin version from header
+$plugin_data = get_file_data( __FILE__, array( 'Version' => 'Version' ), 'plugin' );
+define( 'MDC_VERSION', $plugin_data['Version'] );
+
+#[AllowDynamicProperties]
 class Media_Double_Check {
 
-	private $table_scan;
+	public $table_scan;
+	public $table_mdc;
 
 	public function __construct() {
 		global $wpdb;
@@ -30,7 +37,10 @@ class Media_Double_Check {
 		add_action( 'wp_ajax_mdc_stop_scan', array( $this, 'ajax_stop_scan' ) );
 		add_action( 'wp_ajax_mdc_trash_attachment', array( $this, 'ajax_trash_attachment' ) );
 		add_action( 'wp_ajax_mdc_restore_attachment', array( $this, 'ajax_restore_attachment' ) );
+		add_action( 'wp_ajax_mdc_exclude_attachment', array( $this, 'ajax_exclude_attachment' ) );
+		add_action( 'wp_ajax_mdc_include_attachment', array( $this, 'ajax_include_attachment' ) );
 		add_action( 'wp_ajax_mdc_bulk_trash', array( $this, 'ajax_bulk_trash' ) );
+		add_action( 'wp_ajax_mdc_bulk_action_selected', array( $this, 'ajax_bulk_action_selected' ) );
 		
 		// Background Process Hook
 		add_action( 'mdc_cron_batch', array( $this, 'process_batch' ) );
@@ -47,6 +57,7 @@ class Media_Double_Check {
 			matches_count int(11) DEFAULT 0,
 			matches_data longtext DEFAULT NULL,
 			checked_at datetime DEFAULT CURRENT_TIMESTAMP,
+			is_excluded tinyint(1) DEFAULT 0,
 			PRIMARY KEY  (id),
 			UNIQUE KEY attachment_id (attachment_id)
 		) $charset_collate;";
@@ -56,6 +67,13 @@ class Media_Double_Check {
 	}
 
 	public function register_menu() {
+		global $wpdb;
+		// Migration: Add is_excluded if missing
+		$column = $wpdb->get_results( $wpdb->prepare( "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = %s AND COLUMN_NAME = 'is_excluded'", $this->table_mdc ) );
+		if ( empty( $column ) ) {
+			$wpdb->query( "ALTER TABLE {$this->table_mdc} ADD is_excluded tinyint(1) DEFAULT 0" );
+		}
+
 		add_menu_page(
 			'Media Double Check',
 			'Media Double Check',
@@ -81,11 +99,11 @@ class Media_Double_Check {
 	}
 
 	public function enqueue_assets( $hook ) {
-		if ( 'toplevel_page_media-double-check' !== $hook ) {
+		if ( 'toplevel_page_media-double-check' !== $hook && 'media-double-check_page_mdc-settings' !== $hook ) {
 			return;
 		}
-		wp_enqueue_style( 'mdc-admin-css', plugins_url( 'assets/admin.css', __FILE__ ) );
-		wp_enqueue_script( 'mdc-admin-js', plugins_url( 'assets/admin.js', __FILE__ ), array( 'jquery' ), '1.0.0', true );
+		wp_enqueue_style( 'mdc-admin-css', plugins_url( 'assets/admin.css', __FILE__ ), array(), MDC_VERSION );
+		wp_enqueue_script( 'mdc-admin-js', plugins_url( 'assets/admin.js', __FILE__ ), array( 'jquery' ), MDC_VERSION, true );
 		wp_localize_script( 'mdc-admin-js', 'mdc_params', array(
 			'ajax_url' => admin_url( 'admin-ajax.php' ),
 			'nonce'    => wp_create_nonce( 'mdc_nonce' ),
@@ -201,13 +219,15 @@ class Media_Double_Check {
 		$current_page = isset( $_GET['paged'] ) ? max( 1, intval( $_GET['paged'] ) ) : 1;
 		$filter = isset( $_GET['mdc_filter'] ) ? sanitize_text_field( $_GET['mdc_filter'] ) : 'all';
 		
-		$where = " WHERE p.post_status != 'trash'";
+		$where = " WHERE p.post_status != 'trash' AND m.is_excluded = 0";
 		if ( $filter === 'not_found' ) {
-			$where = " WHERE p.post_status != 'trash' AND m.matches_count = 0";
+			$where = " WHERE p.post_status != 'trash' AND m.is_excluded = 0 AND m.matches_count = 0";
 		} elseif ( $filter === 'used' ) {
-			$where = " WHERE p.post_status != 'trash' AND m.matches_count > 0";
+			$where = " WHERE p.post_status != 'trash' AND m.is_excluded = 0 AND m.matches_count > 0";
 		} elseif ( $filter === 'trash' ) {
 			$where = " WHERE p.post_status = 'trash'";
+		} elseif ( $filter === 'excluded' ) {
+			$where = " WHERE m.is_excluded = 1";
 		}
 
 		$total_items = $wpdb->get_var( "SELECT COUNT(*) FROM {$this->table_mdc} m JOIN {$wpdb->posts} p ON m.attachment_id = p.ID $where" );
@@ -232,6 +252,8 @@ class Media_Double_Check {
 					<button id="mdc-start-scan" class="button button-primary">Start New Deep Scan</button>
 				<?php endif; ?>
 				
+				<button id="mdc-toggle-selection" class="button button-secondary">Bulk Select Mode</button>
+				
 				<span id="mdc-status"><?php echo $status === 'running' ? 'Scanning in progress...' : 'Ready.'; ?></span>
 				
 				<div id="mdc-progress-bar-container" style="<?php echo $status === 'running' ? '' : 'display:none;'; ?> width: 250px; background: #eee; height: 12px; border-radius: 6px; overflow: hidden; margin-left: 20px;">
@@ -253,6 +275,7 @@ class Media_Double_Check {
 								<option value="not_found" <?php selected( $filter, 'not_found' ); ?>>Show Truly Unused</option>
 								<option value="used" <?php selected( $filter, 'used' ); ?>>Show Used</option>
 								<option value="trash" <?php selected( $filter, 'trash' ); ?>>Show Internal Trash</option>
+								<option value="excluded" <?php selected( $filter, 'excluded' ); ?>>Show Excluded (Safe)</option>
 							</select>
 						</form>
 					</div>
@@ -282,6 +305,7 @@ class Media_Double_Check {
 				<table class="wp-list-table widefat fixed striped mdc-custom-table">
 					<thead>
 						<tr>
+							<th class="mdc-col-cb" style="display:none; width: 40px;"><input type="checkbox" id="mdc-cb-select-all"></th>
 							<th style="width: 80px;">ID</th>
 							<th>Filename</th>
 							<th style="width: 150px;">Status</th>
@@ -290,14 +314,26 @@ class Media_Double_Check {
 					</thead>
 					<tbody id="mdc-results-body">
 						<?php if ( empty( $results ) ) : ?>
-							<tr><td colspan="4">No results yet. Click "Start New Deep Scan" to begin.</td></tr>
+							<tr><td colspan="5">No results yet. Click "Start New Deep Scan" to begin.</td></tr>
 						<?php else : ?>
 							<?php foreach ( $results as $row ) : ?>
-								<?php $this->render_row( $row->attachment_id, $row->filename, json_decode( $row->matches_data, true ), $row->post_status ); ?>
+								<?php $this->render_row( $row->attachment_id, $row->filename, json_decode( $row->matches_data, true ), $row->post_status, $row->is_excluded ); ?>
 							<?php endforeach; ?>
 						<?php endif; ?>
 					</tbody>
 				</table>
+			</div>
+
+			<div id="mdc-bulk-actions-bar" style="display:none;">
+				<div class="mdc-bulk-info">
+					<span class="mdc-selected-count">0 items selected</span>
+				</div>
+				<div class="mdc-bulk-buttons">
+					<button id="mdc-bulk-trash-selected" class="button button-secondary mdc-trash-all-btn">Move Selected to Trash</button>
+					<button id="mdc-bulk-exclude-selected" class="button button-secondary">Exclude Selected</button>
+					<button id="mdc-bulk-include-selected" class="button button-secondary" style="display:none;">Include Selected</button>
+					<button id="mdc-cancel-selection" class="button button-link">Cancel</button>
+				</div>
 			</div>
 
 			<div id="mdc-loading-overlay" style="display:none;">
@@ -390,19 +426,72 @@ class Media_Double_Check {
 		wp_send_json_error( 'Restore failed.' );
 	}
 
+	public function ajax_exclude_attachment() {
+		check_ajax_referer( 'mdc_nonce', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Permission denied' );
+
+		$id = isset( $_POST['attachment_id'] ) ? intval( $_POST['attachment_id'] ) : 0;
+		if ( ! $id ) wp_send_json_error( 'Invalid ID' );
+
+		global $wpdb;
+		$wpdb->update( $this->table_mdc, array( 'is_excluded' => 1 ), array( 'attachment_id' => $id ) );
+		wp_send_json_success();
+	}
+
+	public function ajax_include_attachment() {
+		check_ajax_referer( 'mdc_nonce', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Permission denied' );
+
+		$id = isset( $_POST['attachment_id'] ) ? intval( $_POST['attachment_id'] ) : 0;
+		if ( ! $id ) wp_send_json_error( 'Invalid ID' );
+
+		global $wpdb;
+		$wpdb->update( $this->table_mdc, array( 'is_excluded' => 0 ), array( 'attachment_id' => $id ) );
+		wp_send_json_success();
+	}
+
 	public function ajax_bulk_trash() {
 		check_ajax_referer( 'mdc_nonce', 'nonce' );
 		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Permission denied' );
 
 		global $wpdb;
-		// Trash all items with 0 matches that are NOT already trashed
-		$ids = $wpdb->get_col( "SELECT m.attachment_id FROM {$this->table_mdc} m JOIN {$wpdb->posts} p ON m.attachment_id = p.ID WHERE m.matches_count = 0 AND p.post_status != 'trash'" );
+		// Trash all items with 0 matches that are NOT already trashed and NOT excluded
+		$ids = $wpdb->get_col( "SELECT m.attachment_id FROM {$this->table_mdc} m JOIN {$wpdb->posts} p ON m.attachment_id = p.ID WHERE m.matches_count = 0 AND p.post_status != 'trash' AND m.is_excluded = 0" );
 		
 		if ( empty( $ids ) ) wp_send_json_error( 'No unused items found.' );
 
 		$count = 0;
 		foreach ( $ids as $id ) {
 			if ( wp_update_post( array( 'ID' => $id, 'post_status' => 'trash' ) ) ) {
+				$count++;
+			}
+		}
+
+		wp_send_json_success( array( 'count' => $count ) );
+	}
+
+	public function ajax_bulk_action_selected() {
+		check_ajax_referer( 'mdc_nonce', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Permission denied' );
+
+		$ids = isset( $_POST['ids'] ) ? array_map( 'intval', $_POST['ids'] ) : array();
+		$bulk_action = isset( $_POST['bulk_action'] ) ? sanitize_text_field( $_POST['bulk_action'] ) : '';
+
+		if ( empty( $ids ) ) wp_send_json_error( 'No IDs selected.' );
+
+		global $wpdb;
+		$count = 0;
+
+		foreach ( $ids as $id ) {
+			if ( $bulk_action === 'trash' ) {
+				if ( wp_update_post( array( 'ID' => $id, 'post_status' => 'trash' ) ) ) {
+					$count++;
+				}
+			} elseif ( $bulk_action === 'exclude' ) {
+				$wpdb->update( $this->table_mdc, array( 'is_excluded' => 1 ), array( 'attachment_id' => $id ) );
+				$count++;
+			} elseif ( $bulk_action === 'include' ) {
+				$wpdb->update( $this->table_mdc, array( 'is_excluded' => 0 ), array( 'attachment_id' => $id ) );
 				$count++;
 			}
 		}
@@ -461,18 +550,21 @@ class Media_Double_Check {
 		}
 	}
 
-	private function render_row( $id, $filename, $matches, $post_status = '' ) {
+	private function render_row( $id, $filename, $matches, $post_status = '', $is_excluded = 0 ) {
 		$count = count( $matches );
 		$is_used = $count > 0;
 		$is_trashed = ( $post_status === 'trash' );
 		
 		if ( $is_trashed ) {
 			$status_label = '<span class="mdc-status-danger mdc-status-trashed">TRASHED</span>';
+		} elseif ( $is_excluded ) {
+			$status_label = '<span class="mdc-status-safe mdc-status-excluded">EXCLUDED (SAFE)</span>';
 		} else {
 			$status_label = $is_used ? '<span class="mdc-status-danger">USED ('.$count.')</span>' : '<span class="mdc-status-safe">NOT FOUND</span>';
 		}
 		?>
-		<tr class="<?php echo $is_trashed ? 'mdc-row-trashed' : ''; ?>">
+		<tr class="<?php echo $is_trashed ? 'mdc-row-trashed' : ''; ?> <?php echo $is_excluded ? 'mdc-row-excluded' : ''; ?>">
+			<td class="mdc-col-cb" style="display:none;"><input type="checkbox" class="mdc-row-cb" value="<?php echo $id; ?>"></td>
 			<td><?php echo $id; ?></td>
 			<td><strong><?php echo esc_html( $filename ); ?></strong></td>
 			<td><?php echo $status_label; ?></td>
@@ -481,6 +573,11 @@ class Media_Double_Check {
 					<div class="mdc-row-actions">
 						<em>Moved to internal trash.</em>
 						<button class="mdc-restore-btn button button-secondary" data-id="<?php echo $id; ?>">Restore</button>
+					</div>
+				<?php elseif ( $is_excluded ) : ?>
+					<div class="mdc-row-actions">
+						<em>Marked as safe (excluded).</em>
+						<button class="mdc-include-btn button button-secondary" data-id="<?php echo $id; ?>">Include Again</button>
 					</div>
 				<?php elseif ( $is_used ) : ?>
 					<button class="mdc-toggle-matches button button-small" data-id="<?php echo $id; ?>">Toggle Matches</button>
@@ -495,7 +592,11 @@ class Media_Double_Check {
 				<?php else : ?>
 					<div class="mdc-row-actions">
 						<em>No matches found.</em>
-						<button class="mdc-trash-btn button button-link-delete" data-id="<?php echo $id; ?>">Move to Trash</button>
+						<div class="mdc-btn-group">
+							<button class="mdc-trash-btn button button-link-delete" data-id="<?php echo $id; ?>">Move to Trash</button>
+							<span class="mdc-btn-sep">|</span>
+							<button class="mdc-exclude-btn mdc-action-link" data-id="<?php echo $id; ?>">Exclude</button>
+						</div>
 					</div>
 				<?php endif; ?>
 			</td>

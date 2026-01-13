@@ -168,10 +168,16 @@
 .mdc-status-safe { color: #ea580c; background: #fff7ed; padding: 4px 10px; border-radius: 20px; font-size: 11px; }
 .mdc-status-danger { color: #fff; background: #f97316; padding: 4px 10px; border-radius: 20px; font-size: 11px; }
 .mdc-status-trashed { background: #64748b; }
+.mdc-status-excluded { background: #94a3b8; }
 
 .mdc-row-trashed {
     opacity: 0.7;
     background: #f8fafc !important;
+}
+
+.mdc-row-excluded {
+    opacity: 0.8;
+    background: #f1f5f9 !important;
 }
 
 .mdc-match-tag {
@@ -391,4 +397,69 @@ input:checked + .mdc-slider:before {
     border: 0;
     border-top: 1px solid var(--mdc-border);
     margin: 10px 0;
+}
+
+/* Bulk Actions Bar */
+#mdc-bulk-actions-bar {
+    position: fixed;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e293b;
+    color: #fff;
+    padding: 15px 25px;
+    border-radius: 50px;
+    display: flex;
+    align-items: center;
+    gap: 30px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2);
+    z-index: 9999;
+}
+
+.mdc-bulk-info {
+    border-right: 1px solid rgba(255,255,255,0.2);
+    padding-right: 20px;
+}
+
+.mdc-selected-count {
+    font-weight: 700;
+    color: #f97316;
+}
+
+.mdc-bulk-buttons {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+}
+
+.mdc-bulk-buttons .button {
+    border-radius: 20px !important;
+}
+
+.mdc-action-link {
+    cursor: pointer;
+    color: #4f46e5;
+    text-decoration: none;
+    font-size: 13px;
+}
+
+.mdc-action-link:hover {
+    text-decoration: underline;
+}
+
+.mdc-btn-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.mdc-btn-sep {
+    color: #cbd5e1;
+    font-size: 12px;
+}
+
+.mdc-selection-on {
+    background: #f97316 !important;
+    border-color: #f97316 !important;
+    color: #fff !important;
 }
