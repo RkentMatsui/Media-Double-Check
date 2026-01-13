@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Media Double Check
  * Description: Double-checks files flagged as "not found" by Media Cleaner using deep search queries.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: Rowielokent Matsui <devkenmatsui@gmail.com>
  * Author URI: https://github.com/RkentMatsui
  */
@@ -44,6 +44,44 @@ class Media_Double_Check {
 		
 		// Background Process Hook
 		add_action( 'mdc_cron_batch', array( $this, 'process_batch' ) );
+
+		// Manual Sync Hook
+		add_action( 'wp_ajax_mdc_manual_sync_mc', array( $this, 'ajax_manual_sync_mc' ) );
+	}
+
+	public function sync_with_media_cleaner( $attachment_id, $action ) {
+		global $wpdb;
+		$table_mc = $wpdb->prefix . 'mclean_scan';
+
+		// Check if MC table exists
+		if ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table_mc ) ) !== $table_mc ) {
+			return;
+		}
+
+		$data = array();
+		if ( $action === 'trash' ) {
+			$data = array( 'deleted' => 1, 'ignored' => 0 );
+		} elseif ( $action === 'exclude' ) {
+			$data = array( 'ignored' => 1 );
+		} elseif ( $action === 'include' ) {
+			$data = array( 'ignored' => 0, 'deleted' => 0 );
+		}
+
+		if ( ! empty( $data ) ) {
+			$wpdb->update( $table_mc, $data, array( 'postId' => $attachment_id ) );
+		}
+	}
+
+	public function log( $message, $type = 'info' ) {
+		$logs = get_option( 'mdc_logs', array() );
+		$new_log = array(
+			'time' => current_time( 'mysql' ),
+			'type' => $type,
+			'msg'  => $message
+		);
+		array_unshift( $logs, $new_log );
+		$logs = array_slice( $logs, 0, 50 ); // Keep last 50
+		update_option( 'mdc_logs', $logs );
 	}
 
 	public function activate() {
@@ -205,6 +243,47 @@ class Media_Double_Check {
 					<?php submit_button( 'Save Settings', 'button-primary mdc-save-btn' ); ?>
 				</div>
 			</form>
+
+			<div class="mdc-settings-card" style="margin-top: 30px; max-width: 800px;">
+				<h2>System Health & Logs</h2>
+				<?php
+				$last_active = get_option( 'mdc_last_batch_time', 0 );
+				$logs = get_option( 'mdc_logs', array() );
+				?>
+				<div class="mdc-health-stats" style="display: flex; gap: 40px; margin-bottom: 20px; padding: 15px; background: #fff7ed; border-radius: 8px;">
+					<div>
+						<strong>Last Worker Activity:</strong><br>
+						<span><?php echo $last_active ? human_time_diff( $last_active ) . ' ago' : 'Never'; ?></span>
+					</div>
+					<div>
+						<strong>Scan Status:</strong><br>
+						<span style="color: <?php echo $status === 'running' ? '#f97316' : '#64748b'; ?>; font-weight: bold;">
+							<?php echo strtoupper( $status ); ?>
+						</span>
+					</div>
+					<div style="margin-left: auto;">
+						<button id="mdc-manual-sync-mc" class="button button-secondary">Sync with Media Cleaner</button>
+					</div>
+				</div>
+				<p class="description" style="margin-bottom: 20px;">
+					Click "Sync" to ensure all files marked as Trashed or Excluded in this plugin are also hidden/flagged in Media Cleaner.
+				</p>
+
+				<div class="mdc-log-viewer" style="background: #1e293b; color: #cbd5e1; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 11px; max-height: 300px; overflow-y: auto;">
+					<?php if ( empty( $logs ) ) : ?>
+						<div style="color: #64748b;">No logs recorded yet.</div>
+					<?php else : ?>
+						<?php foreach ( $logs as $log ) : ?>
+							<div style="margin-bottom: 4px; border-bottom: 1px solid #334155; padding-bottom: 4px;">
+								<span style="color: #64748b;"><?php echo $log['time']; ?></span> 
+								[<span style="color: <?php echo $log['type'] === 'error' ? '#f87171' : ( $log['type'] === 'warning' ? '#fbbf24' : '#60a5fa' ); ?>;"><?php echo strtoupper( $log['type'] ); ?></span>] 
+								<?php echo esc_html( $log['msg'] ); ?>
+							</div>
+						<?php endforeach; ?>
+					<?php endif; ?>
+				</div>
+				<p class="description">Showing last 50 activity events.</p>
+			</div>
 		</div>
 		<?php
 	}
@@ -377,12 +456,25 @@ class Media_Double_Check {
 		check_ajax_referer( 'mdc_nonce', 'nonce' );
 		$status = get_option( 'mdc_scan_status', 'idle' );
 		$progress = get_option( 'mdc_scan_progress', array( 'offset' => 0, 'total' => 0 ) );
+		$last_active = get_option( 'mdc_last_batch_time', 0 );
+		$is_stalled = false;
+
+		// If running but no activity for 30 seconds, it might be stalled
+		if ( $status === 'running' && $last_active && ( time() - $last_active ) > 30 ) {
+			$is_stalled = true;
+			if ( ! wp_next_scheduled( 'mdc_cron_batch' ) ) {
+				$this->log( 'Worker Stall Detected. Re-kicking cron.', 'warning' );
+				wp_schedule_single_event( time(), 'mdc_cron_batch' );
+			}
+		}
 		
 		wp_send_json_success( array(
-			'status'   => $status,
-			'offset'   => $progress['offset'],
-			'total'    => $progress['total'],
-			'percent'  => $progress['total'] > 0 ? round( ( $progress['offset'] / $progress['total'] ) * 100, 2 ) : 0
+			'status'      => $status,
+			'offset'      => $progress['offset'],
+			'total'       => $progress['total'],
+			'percent'     => $progress['total'] > 0 ? round( ( $progress['offset'] / $progress['total'] ) * 100, 2 ) : 0,
+			'is_stalled'  => $is_stalled,
+			'last_active' => $last_active ? human_time_diff( $last_active ) . ' ago' : 'Never'
 		) );
 	}
 
@@ -400,6 +492,7 @@ class Media_Double_Check {
 		) );
 
 		if ( $result ) {
+			$this->sync_with_media_cleaner( $id, 'trash' );
 			wp_send_json_success();
 		}
 
@@ -420,6 +513,7 @@ class Media_Double_Check {
 		) );
 
 		if ( $result ) {
+			$this->sync_with_media_cleaner( $id, 'include' );
 			wp_send_json_success();
 		}
 
@@ -435,6 +529,7 @@ class Media_Double_Check {
 
 		global $wpdb;
 		$wpdb->update( $this->table_mdc, array( 'is_excluded' => 1 ), array( 'attachment_id' => $id ) );
+		$this->sync_with_media_cleaner( $id, 'exclude' );
 		wp_send_json_success();
 	}
 
@@ -447,6 +542,7 @@ class Media_Double_Check {
 
 		global $wpdb;
 		$wpdb->update( $this->table_mdc, array( 'is_excluded' => 0 ), array( 'attachment_id' => $id ) );
+		$this->sync_with_media_cleaner( $id, 'include' );
 		wp_send_json_success();
 	}
 
@@ -463,11 +559,41 @@ class Media_Double_Check {
 		$count = 0;
 		foreach ( $ids as $id ) {
 			if ( wp_update_post( array( 'ID' => $id, 'post_status' => 'trash' ) ) ) {
+				$this->sync_with_media_cleaner( $id, 'trash' );
 				$count++;
 			}
 		}
 
 		wp_send_json_success( array( 'count' => $count ) );
+	}
+
+	public function ajax_manual_sync_mc() {
+		check_ajax_referer( 'mdc_nonce', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Permission denied' );
+
+		global $wpdb;
+		$table_mc = $wpdb->prefix . 'mclean_scan';
+
+		if ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table_mc ) ) !== $table_mc ) {
+			wp_send_json_error( 'Media Cleaner table not found.' );
+		}
+
+		// 1. Sync MDC Trashed items -> MC
+		$trashed_ids = $wpdb->get_col( "SELECT attachment_id FROM {$this->table_mdc} WHERE attachment_id IN (SELECT ID FROM {$wpdb->posts} WHERE post_status = 'trash')" );
+		foreach ( $trashed_ids as $id ) {
+			$wpdb->update( $table_mc, array( 'deleted' => 1 ), array( 'postId' => $id ) );
+		}
+
+		// 2. Sync MDC Excluded items -> MC
+		$excluded_ids = $wpdb->get_col( "SELECT attachment_id FROM {$this->table_mdc} WHERE is_excluded = 1" );
+		foreach ( $excluded_ids as $id ) {
+			$wpdb->update( $table_mc, array( 'ignored' => 1 ), array( 'postId' => $id ) );
+		}
+
+		// 3. Optional: Sync MC Trashed -> MDC results (mark as trash/excluded if mismatch)
+		// We'll leave this for now as it's more complex, but the above covers the main user request.
+
+		wp_send_json_success( 'Synchronization complete.' );
 	}
 
 	public function ajax_bulk_action_selected() {
@@ -485,13 +611,16 @@ class Media_Double_Check {
 		foreach ( $ids as $id ) {
 			if ( $bulk_action === 'trash' ) {
 				if ( wp_update_post( array( 'ID' => $id, 'post_status' => 'trash' ) ) ) {
+					$this->sync_with_media_cleaner( $id, 'trash' );
 					$count++;
 				}
 			} elseif ( $bulk_action === 'exclude' ) {
 				$wpdb->update( $this->table_mdc, array( 'is_excluded' => 1 ), array( 'attachment_id' => $id ) );
+				$this->sync_with_media_cleaner( $id, 'exclude' );
 				$count++;
 			} elseif ( $bulk_action === 'include' ) {
 				$wpdb->update( $this->table_mdc, array( 'is_excluded' => 0 ), array( 'attachment_id' => $id ) );
+				$this->sync_with_media_cleaner( $id, 'include' );
 				$count++;
 			}
 		}
@@ -508,45 +637,73 @@ class Media_Double_Check {
 		$offset = $progress['offset'];
 		$batch_size = 10;
 
-		$items = $wpdb->get_results( $wpdb->prepare( 
-			"SELECT * FROM {$this->table_scan} WHERE issue = 'NO_CONTENT' AND type = 1 LIMIT %d, %d",
-			$offset, $batch_size
-		) );
+		update_option( 'mdc_last_batch_time', time() );
+		$this->log( "Starting batch at offset $offset", 'info' );
 
-		if ( empty( $items ) ) {
-			update_option( 'mdc_scan_status', 'idle' );
-			return;
-		}
+		try {
+			$table_mc = $wpdb->prefix . 'mclean_scan';
+			$has_mc = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table_mc ) ) === $table_mc;
 
-		foreach ( $items as $item ) {
-			$attachment_id = $item->postId;
-			$attachment_path = get_attached_file( $attachment_id );
-			if ( ! $attachment_path ) {
-                $attachment_path = $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_wp_attached_file'", $attachment_id ) );
+			// Filter: Only check items that are NOT deleted or ignored in Media Cleaner
+			$where_filter = "WHERE issue = 'NO_CONTENT' AND type = 1";
+			if ( $has_mc ) {
+				$where_filter .= " AND (deleted = 0 AND ignored = 0)";
 			}
-            if ( ! $attachment_path ) continue;
 
-			$filename = pathinfo( $attachment_path, PATHINFO_FILENAME );
-			$matches = $this->perform_deep_check( $attachment_id, $filename );
-
-			$wpdb->replace( $this->table_mdc, array(
-				'attachment_id' => $attachment_id,
-				'filename'      => $filename,
-				'matches_count' => count( $matches ),
-				'matches_data'  => json_encode( $matches ),
-				'checked_at'    => current_time( 'mysql' )
+			$items = $wpdb->get_results( $wpdb->prepare( 
+				"SELECT * FROM {$this->table_scan} $where_filter LIMIT %d, %d",
+				$offset, $batch_size
 			) );
-		}
 
-		// Update progress
-		$new_offset = $offset + count( $items );
-		update_option( 'mdc_scan_progress', array( 'offset' => $new_offset, 'total' => $progress['total'] ) );
+			if ( empty( $items ) ) {
+				$this->log( "No more items found. Finishing scan.", 'info' );
+				update_option( 'mdc_scan_status', 'idle' );
+				return;
+			}
 
-		if ( $new_offset < $progress['total'] ) {
-			// Schedule next batch immediately
-			wp_schedule_single_event( time(), 'mdc_cron_batch' );
-		} else {
-			update_option( 'mdc_scan_status', 'idle' );
+			foreach ( $items as $item ) {
+				$attachment_id = $item->postId;
+				
+				try {
+					$attachment_path = get_attached_file( $attachment_id );
+					if ( ! $attachment_path ) {
+						$attachment_path = $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_wp_attached_file'", $attachment_id ) );
+					}
+					
+					if ( ! $attachment_path ) {
+						$this->log( "ID $attachment_id: No file path found. Skipping.", 'warning' );
+						continue;
+					}
+
+					$filename = pathinfo( $attachment_path, PATHINFO_FILENAME );
+					$matches = $this->perform_deep_check( $attachment_id, $filename );
+
+					$wpdb->replace( $this->table_mdc, array(
+						'attachment_id' => $attachment_id,
+						'filename'      => $filename,
+						'matches_count' => count( $matches ),
+						'matches_data'  => json_encode( $matches ),
+						'checked_at'    => current_time( 'mysql' )
+					) );
+				} catch ( Exception $e ) {
+					$this->log( "Error processing item $attachment_id: " . $e->getMessage(), 'error' );
+				}
+			}
+
+			// Update progress
+			$new_offset = $offset + count( $items );
+			update_option( 'mdc_scan_progress', array( 'offset' => $new_offset, 'total' => $progress['total'] ) );
+
+			if ( $new_offset < $progress['total'] ) {
+				wp_schedule_single_event( time() + 1, 'mdc_cron_batch' );
+			} else {
+				$this->log( "Scan complete. Processed $new_offset items.", 'success' );
+				update_option( 'mdc_scan_status', 'idle' );
+			}
+		} catch ( Exception $e ) {
+			$this->log( "Batch Level Error: " . $e->getMessage(), 'error' );
+			// Wait a bit and try again
+			wp_schedule_single_event( time() + 5, 'mdc_cron_batch' );
 		}
 	}
 
@@ -620,6 +777,7 @@ class Media_Double_Check {
 
 		// Escape for LIKE
 		$search_filename = '%' . $wpdb->esc_like( $filename ) . '%';
+		$search_id_raw = '%' . $wpdb->esc_like( $id ) . '%';
 		$search_id_serialized = '%' . $wpdb->esc_like( '"' . $id . '"' ) . '%';
 		$search_id_elementor = '%' . $wpdb->esc_like( ': ' . $id ) . '%'; // Elementor uses ID in JSON paths sometimes
 
@@ -629,9 +787,9 @@ class Media_Double_Check {
 		$queries[] = $wpdb->prepare(
 			"SELECT 'posts' AS source, ID AS item_id, post_title AS label, post_type AS subtype, 'Post Content' AS match_type
 			 FROM {$wpdb->posts}
-			 WHERE (post_content LIKE %s OR post_excerpt LIKE %s OR post_content LIKE %s)
+			 WHERE (post_content LIKE %s OR post_excerpt LIKE %s OR post_content LIKE %s OR post_content LIKE %s)
 			 AND ID != %d",
-			$search_filename, $search_filename, $search_id_serialized, $id
+			$search_filename, $search_filename, $search_id_serialized, $search_id_raw, $id
 		);
 
 		// 2. CHECK POSTMETA (Conditional)
@@ -662,9 +820,10 @@ class Media_Double_Check {
 				    meta_value LIKE %s
 				    OR meta_value = %s
 				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
 				 )
 				 AND post_id != %d",
-				...array_merge( $meta_keys, [ $search_filename, (string)$id, $search_id_serialized, $id ] )
+				...array_merge( $meta_keys, [ $search_filename, (string)$id, $search_id_serialized, $search_id_raw, $id ] )
 			);
 		}
 
@@ -692,9 +851,11 @@ class Media_Double_Check {
 				 WHERE o2.option_value LIKE 'field_%%'
 				 AND (
 				    o1.option_value LIKE %s
+				    OR o1.option_value = %s
+				    OR o1.option_value LIKE %s
 				    OR o1.option_value LIKE %s
 				 )",
-				$search_filename, $search_id_serialized
+				$search_filename, (string)$id, $search_id_serialized, $search_id_raw
 			);
 
 			// ACF Term Meta
@@ -706,8 +867,9 @@ class Media_Double_Check {
 				 AND (
 				    tm1.meta_value = %s
 				    OR tm1.meta_value LIKE %s
+				    OR tm1.meta_value LIKE %s
 				 )",
-				(string)$id, $search_filename
+				(string)$id, $search_filename, $search_id_serialized
 			);
 		}
 
@@ -735,8 +897,10 @@ class Media_Double_Check {
 			"SELECT 'options' AS source, option_id AS item_id, option_name AS label, '-' AS subtype, 'Global Theme Settings' AS match_type
 			 FROM {$wpdb->options}
 			 WHERE option_value LIKE %s 
+			 OR option_value = %s
+			 OR option_value LIKE %s
 			 OR option_value LIKE %s",
-			$search_filename, $search_id_serialized
+			$search_filename, (string)$id, $search_id_serialized, $search_id_raw
 		);
 
 		// 4. CHECK TERMMETA
@@ -744,8 +908,9 @@ class Media_Double_Check {
 			"SELECT 'termmeta' AS source, term_id AS item_id, meta_key AS label, '-' AS subtype, 'Category/Attribute/Brand' AS match_type
 			 FROM {$wpdb->termmeta}
 			 WHERE meta_value = %s 
+			 OR meta_value LIKE %s
 			 OR meta_value LIKE %s",
-			(string)$id, $search_filename
+			(string)$id, $search_filename, $search_id_raw
 		);
 
 		$all_matches = array();

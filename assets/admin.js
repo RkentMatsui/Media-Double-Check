@@ -338,6 +338,12 @@ jQuery(document).ready(function($) {
                     $('#mdc-progress-bar').css('width', data.percent + '%');
                     $('#mdc-progress-text').text(`${data.offset} / ${data.total}`);
                     
+                    if (data.is_stalled) {
+                        $('#mdc-status').text('Repairing stall (Re-kicking worker)...').css('color', '#f97316');
+                    } else if (data.status === 'running') {
+                        $('#mdc-status').text('Scanning in progress...').css('color', '');
+                    }
+
                     if (data.status === 'idle') {
                         clearInterval(statusInterval);
                         location.reload();
@@ -346,4 +352,30 @@ jQuery(document).ready(function($) {
             }
         });
     }
+
+    // Manual Media Cleaner Sync
+    $('#mdc-manual-sync-mc').on('click', function() {
+        const $btn = $(this);
+        $btn.prop('disabled', true).text('Synchronizing...');
+
+        $.ajax({
+            url: mdc_params.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'mdc_manual_sync_mc',
+                nonce: mdc_params.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert(response.data);
+                    location.reload();
+                } else {
+                    alert('Error: ' + response.data);
+                }
+            },
+            complete: function() {
+                $btn.prop('disabled', false).text('Sync with Media Cleaner');
+            }
+        });
+    });
 });
