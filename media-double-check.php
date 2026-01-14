@@ -435,7 +435,16 @@ class Media_Double_Check {
 
 		// Reset state
 		update_option( 'mdc_scan_status', 'running' );
-		$total = $wpdb->get_var( "SELECT COUNT(*) FROM {$this->table_scan} WHERE issue = 'NO_CONTENT' AND type = 1" );
+		
+		$table_mc = $wpdb->prefix . 'mclean_scan';
+		$has_mc = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table_mc ) ) === $table_mc;
+		
+		$where_filter = "WHERE issue = 'NO_CONTENT' AND type = 1";
+		if ( $has_mc ) {
+			$where_filter .= " AND (deleted = 0 AND ignored = 0)";
+		}
+
+		$total = $wpdb->get_var( "SELECT COUNT(*) FROM {$this->table_scan} $where_filter" );
 		update_option( 'mdc_scan_progress', array( 'offset' => 0, 'total' => (int)$total ) );
 
 		// Clear old results if starting fresh
