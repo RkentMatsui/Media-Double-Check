@@ -248,6 +248,7 @@ class Media_Double_Check {
 			<div class="mdc-settings-card" style="margin-top: 30px; max-width: 800px;">
 				<h2>System Health & Logs</h2>
 				<?php
+				$status = get_option( 'mdc_scan_status', 'idle' );
 				$last_active = get_option( 'mdc_last_batch_time', 0 );
 				$logs = get_option( 'mdc_logs', array() );
 				?>
