@@ -45,8 +45,9 @@ class Media_Double_Check {
 		// Background Process Hook
 		add_action( 'mdc_cron_batch', array( $this, 'process_batch' ) );
 
-		// Manual Sync Hook
+		// Manual Sync Hooks
 		add_action( 'wp_ajax_mdc_manual_sync_mc', array( $this, 'ajax_manual_sync_mc' ) );
+		add_action( 'wp_ajax_mdc_force_resume', array( $this, 'ajax_force_resume' ) );
 	}
 
 	public function sync_with_media_cleaner( $attachment_id, $action ) {
@@ -261,7 +262,8 @@ class Media_Double_Check {
 							<?php echo strtoupper( $status ); ?>
 						</span>
 					</div>
-					<div style="margin-left: auto;">
+					<div style="margin-left: auto; display: flex; gap: 10px;">
+						<button id="mdc-force-resume" class="button button-warning" <?php echo $status !== 'running' ? 'disabled' : ''; ?>>Force Worker Resume</button>
 						<button id="mdc-manual-sync-mc" class="button button-secondary">Sync with Media Cleaner</button>
 					</div>
 				</div>
@@ -327,6 +329,7 @@ class Media_Double_Check {
 			<div class="mdc-actions">
 				<?php if ( $status === 'running' ) : ?>
 					<button id="mdc-stop-scan" class="button button-secondary">Stop Scan</button>
+					<button id="mdc-resume-scan" class="button button-warning" style="display:none;">Resume Scan</button>
 				<?php else : ?>
 					<button id="mdc-start-scan" class="button button-primary">Start New Deep Scan</button>
 				<?php endif; ?>
@@ -459,13 +462,9 @@ class Media_Double_Check {
 		$last_active = get_option( 'mdc_last_batch_time', 0 );
 		$is_stalled = false;
 
-		// If running but no activity for 30 seconds, it might be stalled
-		if ( $status === 'running' && $last_active && ( time() - $last_active ) > 30 ) {
+		// If running but no activity for 60 seconds, it might be stalled
+		if ( $status === 'running' && $last_active && ( time() - $last_active ) > 60 ) {
 			$is_stalled = true;
-			if ( ! wp_next_scheduled( 'mdc_cron_batch' ) ) {
-				$this->log( 'Worker Stall Detected. Re-kicking cron.', 'warning' );
-				wp_schedule_single_event( time(), 'mdc_cron_batch' );
-			}
 		}
 		
 		wp_send_json_success( array(
@@ -476,6 +475,18 @@ class Media_Double_Check {
 			'is_stalled'  => $is_stalled,
 			'last_active' => $last_active ? human_time_diff( $last_active ) . ' ago' : 'Never'
 		) );
+	}
+
+	public function ajax_force_resume() {
+		check_ajax_referer( 'mdc_nonce', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Permission denied' );
+
+		update_option( 'mdc_scan_status', 'running' );
+		wp_clear_scheduled_hook( 'mdc_cron_batch' );
+		wp_schedule_single_event( time(), 'mdc_cron_batch' );
+		
+		$this->log( 'Manual Worker Resume triggered.', 'info' );
+		wp_send_json_success( 'Worker re-kicked successfully.' );
 	}
 
 	public function ajax_trash_attachment() {

@@ -339,9 +339,11 @@ jQuery(document).ready(function($) {
                     $('#mdc-progress-text').text(`${data.offset} / ${data.total}`);
                     
                     if (data.is_stalled) {
-                        $('#mdc-status').text('Repairing stall (Re-kicking worker)...').css('color', '#f97316');
+                        $('#mdc-status').text('Stall detected (Activity: ' + data.last_active + ')').css('color', '#dc2626');
+                        $('#mdc-resume-scan').show();
                     } else if (data.status === 'running') {
                         $('#mdc-status').text('Scanning in progress...').css('color', '');
+                        $('#mdc-resume-scan').hide();
                     }
 
                     if (data.status === 'idle') {
@@ -352,6 +354,29 @@ jQuery(document).ready(function($) {
             }
         });
     }
+
+    // Resume Scan Handler (Dash)
+    $('#mdc-resume-scan').on('click', function() {
+        const $btn = $(this);
+        $btn.prop('disabled', true).text('Resuming...');
+
+        $.ajax({
+            url: mdc_params.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'mdc_force_resume',
+                nonce: mdc_params.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    $btn.hide().prop('disabled', false).text('Resume Scan');
+                } else {
+                    alert('Error: ' + response.data);
+                    $btn.prop('disabled', false).text('Resume Scan');
+                }
+            }
+        });
+    });
 
     // Manual Media Cleaner Sync
     $('#mdc-manual-sync-mc').on('click', function() {
@@ -375,6 +400,30 @@ jQuery(document).ready(function($) {
             },
             complete: function() {
                 $btn.prop('disabled', false).text('Sync with Media Cleaner');
+            }
+        });
+    });
+
+    // Force Resume
+    $('#mdc-force-resume').on('click', function() {
+        const $btn = $(this);
+        $btn.prop('disabled', true).text('Resuming...');
+
+        $.ajax({
+            url: mdc_params.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'mdc_force_resume',
+                nonce: mdc_params.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert(response.data);
+                    location.reload();
+                } else {
+                    alert('Error: ' + response.data);
+                    $btn.prop('disabled', false).text('Force Worker Resume');
+                }
             }
         });
     });
