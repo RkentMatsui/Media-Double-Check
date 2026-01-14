@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Media Double Check
  * Description: Double-checks files flagged as "not found" by Media Cleaner using deep search queries.
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: Rowielokent Matsui <devkenmatsui@gmail.com>
  * Author URI: https://github.com/RkentMatsui
  */
@@ -761,6 +761,85 @@ class Media_Double_Check {
 		<?php
 	}
 
+	private function get_ignored_keys_where( $col = 'meta_key' ) {
+		$ignored_patterns = array(
+			// From Examples & Initial patterns
+			'_transient_%',
+			'itsec_%',
+			'sgo_%',
+			'_wc_var_prices_%',
+			'_wp_session_%',
+			'%_hashes',
+			'%_amount%',
+			'%_price%',
+			'%_CAD',
+			'%_canada',
+			'%_tax%',
+			'flickr_data_array',
+			// From Real Data Scan
+			'partner',
+			'product',
+			'product_id',
+			'_edit_last',
+			'created_by',
+			'_approved_by',
+			'_customer_user',
+			'_date_%',
+			'_wcpdf_%',
+			'_ga_%',
+			'_wc_order_attribution_%',
+			'_wc_braintree_%',
+			'zoho_order_id',
+			'%_phone',
+			'%_postcode',
+			'shipped_date',
+			'manual_delivered_date',
+			'jetpack_sync_%',
+			'stellarwp_%',
+			'_yoast_wpseo_estimated-reading-time-minutes',
+			'_menu_item_menu_item_parent',
+			'_menu_item_object_id',
+			'total_sales',
+			'_stock',
+			'_dp_original',
+			'_is_copy',
+			'paid',
+			'expired',
+			'is_soon',
+			'order_approved',
+			'is_overdue',
+			// New patterns from Port 10016
+			'_wt_import_key',
+			'_order_number',
+			'wpmm_%',
+			'mfn-post-love',
+			'%_count',
+			'_thankyou_%',
+			'_imagify_%',
+			'_botiga_%',
+			'%_size',
+			'power_%',
+			'power',
+			'fb_product_%',
+			'invoice_id',
+			'siteground_optimizer_%',
+			'sg_security_%',
+			'_download_%',
+			'wf_order_%'
+		);
+		
+		$wheres = array();
+		foreach ( $ignored_patterns as $pattern ) {
+			// Don't blacklist if it looks like a media key anyway
+			if ( stripos($pattern, 'image') !== false || stripos($pattern, 'icon') !== false || stripos($pattern, 'thumb') !== false || stripos($pattern, 'logo') !== false ) {
+				continue;
+			}
+			$wheres[] = "{$col} NOT LIKE '" . esc_sql( $pattern ) . "'";
+		}
+		
+		return " AND (" . implode( ' AND ', $wheres ) . ")";
+	}
+
 	private function perform_deep_check( $id, $filename ) {
 		global $wpdb;
 
@@ -777,9 +856,13 @@ class Media_Double_Check {
 
 		// Escape for LIKE
 		$search_filename = '%' . $wpdb->esc_like( $filename ) . '%';
-		$search_id_raw = '%' . $wpdb->esc_like( $id ) . '%';
-		$search_id_serialized = '%' . $wpdb->esc_like( '"' . $id . '"' ) . '%';
-		$search_id_elementor = '%' . $wpdb->esc_like( ': ' . $id ) . '%'; // Elementor uses ID in JSON paths sometimes
+		$search_id_serialized_str = '%' . $wpdb->esc_like( '"' . $id . '"' ) . '%';
+		$search_id_serialized_int = '%' . $wpdb->esc_like( 'i:' . $id . ';' ) . '%';
+		$search_id_comma_left     = '%' . $wpdb->esc_like( ',' . $id ) . '%';
+		$search_id_comma_right    = '%' . $wpdb->esc_like( $id . ',' ) . '%';
+		$search_id_elementor      = '%' . $wpdb->esc_like( ': ' . $id ) . '%'; 
+		
+		$search_id_raw = '%' . $wpdb->esc_like( $id ) . '%'; // Still used for post_content
 
 		$queries = array();
 
@@ -789,7 +872,7 @@ class Media_Double_Check {
 			 FROM {$wpdb->posts}
 			 WHERE (post_content LIKE %s OR post_excerpt LIKE %s OR post_content LIKE %s OR post_content LIKE %s)
 			 AND ID != %d",
-			$search_filename, $search_filename, $search_id_serialized, $search_id_raw, $id
+			$search_filename, $search_filename, $search_id_serialized_str, $search_id_raw, $id
 		);
 
 		// 2. CHECK POSTMETA (Conditional)
@@ -817,13 +900,16 @@ class Media_Double_Check {
 				 FROM {$wpdb->postmeta}
 				 WHERE meta_key IN ($placeholders)
 				 AND (
-				    meta_value LIKE %s
-				    OR meta_value = %s
+				    meta_value = %s
+				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
 				    OR meta_value LIKE %s
 				    OR meta_value LIKE %s
 				 )
 				 AND post_id != %d",
-				...array_merge( $meta_keys, [ $search_filename, (string)$id, $search_id_serialized, $search_id_raw, $id ] )
+				...array_merge( $meta_keys, [ (string)$id, $search_filename, $search_id_serialized_str, $search_id_serialized_int, $search_id_comma_left, $search_id_comma_right, $search_id_elementor, $id ] )
 			);
 		}
 
@@ -835,12 +921,16 @@ class Media_Double_Check {
 				 JOIN {$wpdb->postmeta} pm2 ON pm1.post_id = pm2.post_id AND pm2.meta_key = CONCAT('_', pm1.meta_key)
 				 WHERE pm2.meta_value LIKE 'field_%%'
 				 AND (
-				    pm1.meta_value LIKE %s
-				    OR pm1.meta_value = %s
+				    pm1.meta_value = %s
+				    OR pm1.meta_value LIKE %s
+				    OR pm1.meta_value LIKE %s
+				    OR pm1.meta_value LIKE %s
+				    OR pm1.meta_value LIKE %s
+				    OR pm1.meta_value LIKE %s
 				    OR pm1.meta_value LIKE %s
 				 )
-				 AND pm1.post_id != %d",
-				$search_filename, (string)$id, $search_id_serialized, $id
+				 AND pm1.post_id != %d" . $this->get_ignored_keys_where('pm1.meta_key'),
+				(string)$id, $search_filename, $search_id_serialized_str, $search_id_serialized_int, $search_id_comma_left, $search_id_comma_right, $search_id_elementor, $id
 			);
 
 			// ACF Options Pages
@@ -850,12 +940,15 @@ class Media_Double_Check {
 				 JOIN {$wpdb->options} o2 ON o2.option_name = CONCAT('_', o1.option_name)
 				 WHERE o2.option_value LIKE 'field_%%'
 				 AND (
-				    o1.option_value LIKE %s
-				    OR o1.option_value = %s
+				    o1.option_value = %s
 				    OR o1.option_value LIKE %s
 				    OR o1.option_value LIKE %s
-				 )",
-				$search_filename, (string)$id, $search_id_serialized, $search_id_raw
+				    OR o1.option_value LIKE %s
+				    OR o1.option_value LIKE %s
+				    OR o1.option_value LIKE %s
+				    OR o1.option_value LIKE %s
+				 )" . $this->get_ignored_keys_where('o1.option_name'),
+				(string)$id, $search_filename, $search_id_serialized_str, $search_id_serialized_int, $search_id_comma_left, $search_id_comma_right, $search_id_elementor
 			);
 
 			// ACF Term Meta
@@ -868,8 +961,12 @@ class Media_Double_Check {
 				    tm1.meta_value = %s
 				    OR tm1.meta_value LIKE %s
 				    OR tm1.meta_value LIKE %s
-				 )",
-				(string)$id, $search_filename, $search_id_serialized
+				    OR tm1.meta_value LIKE %s
+				    OR tm1.meta_value LIKE %s
+				    OR tm1.meta_value LIKE %s
+				    OR tm1.meta_value LIKE %s
+				 )" . $this->get_ignored_keys_where('tm1.meta_key'),
+				(string)$id, $search_filename, $search_id_serialized_str, $search_id_serialized_int, $search_id_comma_left, $search_id_comma_right, $search_id_elementor
 			);
 		}
 
@@ -883,12 +980,16 @@ class Media_Double_Check {
 				 FROM {$wpdb->postmeta}
 				 WHERE meta_key NOT IN ($placeholders_exclude)
 				 AND (
-				    meta_value LIKE %s
-				    OR meta_value = %s
+				    meta_value = %s
+				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
+				    OR meta_value LIKE %s
 				    OR meta_value LIKE %s
 				 )
-				 AND post_id != %d",
-				...array_merge( $exclude_keys, [ $search_filename, (string)$id, $search_id_serialized, $id ] )
+				 AND post_id != %d" . $this->get_ignored_keys_where('meta_key'),
+				...array_merge( $exclude_keys, [ (string)$id, $search_filename, $search_id_serialized_str, $search_id_serialized_int, $search_id_comma_left, $search_id_comma_right, $search_id_elementor, $id ] )
 			);
 		}
 
@@ -896,21 +997,32 @@ class Media_Double_Check {
 		$queries[] = $wpdb->prepare(
 			"SELECT 'options' AS source, option_id AS item_id, option_name AS label, '-' AS subtype, 'Global Theme Settings' AS match_type
 			 FROM {$wpdb->options}
-			 WHERE option_value LIKE %s 
-			 OR option_value = %s
-			 OR option_value LIKE %s
-			 OR option_value LIKE %s",
-			$search_filename, (string)$id, $search_id_serialized, $search_id_raw
+			 WHERE (
+			    option_value = %s
+			    OR option_value LIKE %s
+			    OR option_value LIKE %s
+			    OR option_value LIKE %s
+			    OR option_value LIKE %s
+			    OR option_value LIKE %s
+			    OR option_value LIKE %s
+			 )" . $this->get_ignored_keys_where('option_name'),
+			(string)$id, $search_filename, $search_id_serialized_str, $search_id_serialized_int, $search_id_comma_left, $search_id_comma_right, $search_id_elementor
 		);
 
 		// 4. CHECK TERMMETA
 		$queries[] = $wpdb->prepare(
 			"SELECT 'termmeta' AS source, term_id AS item_id, meta_key AS label, '-' AS subtype, 'Category/Attribute/Brand' AS match_type
 			 FROM {$wpdb->termmeta}
-			 WHERE meta_value = %s 
-			 OR meta_value LIKE %s
-			 OR meta_value LIKE %s",
-			(string)$id, $search_filename, $search_id_raw
+			 WHERE (
+			    meta_value = %s 
+			    OR meta_value LIKE %s
+			    OR meta_value LIKE %s
+			    OR meta_value LIKE %s
+			    OR meta_value LIKE %s
+			    OR meta_value LIKE %s
+			    OR meta_value LIKE %s
+			 )",
+			(string)$id, $search_filename, $search_id_serialized_str, $search_id_serialized_int, $search_id_comma_left, $search_id_comma_right, $search_id_elementor
 		);
 
 		$all_matches = array();
