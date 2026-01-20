@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Media Double Check
  * Description: Double-checks files flagged as "not found" by Media Cleaner using deep search queries.
- * Version: 1.0.3
+ * Version: 1.0.4
  * Author: Rowielokent Matsui <devkenmatsui@gmail.com>
  * Author URI: https://github.com/RkentMatsui
  */
