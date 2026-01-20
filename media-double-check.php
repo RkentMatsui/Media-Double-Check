@@ -245,6 +245,23 @@ class Media_Double_Check {
 				</div>
 			</form>
 
+			<div class="mdc-settings-card" style="margin-top: 30px; max-width: 800px; border-left: 4px solid #4f46e5;">
+				<h2>High-Reliability Background Processing</h2>
+				<p>For staging or large sites, standard WordPress Cron might be unreliable. We recommend setting up a <strong>Real Server Cron</strong>.</p>
+				
+				<div style="background: #f8fafc; padding: 15px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 20px;">
+					<p><strong>1. Recommended wp-config.php Change</strong></p>
+					<p>Add this line to your <code>wp-config.php</code> to disable the default visitor-based cron:</p>
+					<code style="display: block; background: #fff; padding: 8px; border: 1px dashed #cbd5e1; margin-top: 5px;">define( 'DISABLE_WP_CRON', true );</code>
+				</div>
+
+				<div style="background: #f8fafc; padding: 15px; border-radius: 6px; border: 1px solid #e2e8f0;">
+					<p><strong>2. Server Control Panel (Crontab) Command</strong></p>
+					<p>Add this command to your server's crontab (set to run every 1 minute):</p>
+					<code style="display: block; background: #fff; padding: 8px; border: 1px dashed #cbd5e1; margin-top: 5px;">* * * * * wget -q -O - <?php echo site_url('wp-cron.php?doing_wp_cron'); ?> >/dev/null 2>&1</code>
+				</div>
+			</div>
+
 			<div class="mdc-settings-card" style="margin-top: 30px; max-width: 800px;">
 				<h2>System Health & Logs</h2>
 				<?php
@@ -654,76 +671,87 @@ class Media_Double_Check {
 		if ( $status !== 'running' ) return;
 
 		global $wpdb;
+		$start_time = microtime( true );
+		$time_limit = 20; // 20 seconds maximum per trigger
+		$batch_size = 5; // Smaller sub-batches for frequent progress updates
+
 		$progress = get_option( 'mdc_scan_progress' );
-		$offset = $progress['offset'];
-		$batch_size = 10;
+		$offset = (int)$progress['offset'];
 
 		update_option( 'mdc_last_batch_time', time() );
-		$this->log( "Starting batch at offset $offset", 'info' );
+		$this->log( "Worker triggered. Starting at offset $offset", 'info' );
 
 		try {
 			$table_mc = $wpdb->prefix . 'mclean_scan';
 			$has_mc = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table_mc ) ) === $table_mc;
 
-			// Filter: Only check items that are NOT deleted or ignored in Media Cleaner
 			$where_filter = "WHERE issue = 'NO_CONTENT' AND type = 1";
 			if ( $has_mc ) {
 				$where_filter .= " AND (deleted = 0 AND ignored = 0)";
 			}
 
-			$items = $wpdb->get_results( $wpdb->prepare( 
-				"SELECT * FROM {$this->table_scan} $where_filter LIMIT %d, %d",
-				$offset, $batch_size
-			) );
+			// Greedy Loop: Keep working until time is up
+			while ( ( microtime( true ) - $start_time ) < $time_limit ) {
+				$items = $wpdb->get_results( $wpdb->prepare( 
+					"SELECT * FROM {$this->table_scan} $where_filter LIMIT %d, %d",
+					$offset, $batch_size
+				) );
 
-			if ( empty( $items ) ) {
-				$this->log( "No more items found. Finishing scan.", 'info' );
-				update_option( 'mdc_scan_status', 'idle' );
-				return;
-			}
-
-			foreach ( $items as $item ) {
-				$attachment_id = $item->postId;
-				
-				try {
-					$attachment_path = get_attached_file( $attachment_id );
-					if ( ! $attachment_path ) {
-						$attachment_path = $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_wp_attached_file'", $attachment_id ) );
-					}
-					
-					if ( ! $attachment_path ) {
-						$this->log( "ID $attachment_id: No file path found. Skipping.", 'warning' );
-						continue;
-					}
-
-					$filename = pathinfo( $attachment_path, PATHINFO_FILENAME );
-					$matches = $this->perform_deep_check( $attachment_id, $filename );
-
-					$wpdb->replace( $this->table_mdc, array(
-						'attachment_id' => $attachment_id,
-						'filename'      => $filename,
-						'matches_count' => count( $matches ),
-						'matches_data'  => json_encode( $matches ),
-						'checked_at'    => current_time( 'mysql' )
-					) );
-				} catch ( Exception $e ) {
-					$this->log( "Error processing item $attachment_id: " . $e->getMessage(), 'error' );
+				if ( empty( $items ) ) {
+					$this->log( "All items processed. Finishing scan.", 'info' );
+					update_option( 'mdc_scan_status', 'idle' );
+					return;
 				}
+
+				foreach ( $items as $item ) {
+					$attachment_id = $item->postId;
+					
+					try {
+						$attachment_path = get_attached_file( $attachment_id );
+						if ( ! $attachment_path ) {
+							$attachment_path = $wpdb->get_var( $wpdb->prepare( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_wp_attached_file'", $attachment_id ) );
+						}
+						
+						if ( ! $attachment_path ) {
+							$this->log( "ID $attachment_id: No file path found. Skipping.", 'warning' );
+							$offset++;
+							continue;
+						}
+
+						$filename = pathinfo( $attachment_path, PATHINFO_FILENAME );
+						$matches = $this->perform_deep_check( $attachment_id, $filename );
+
+						$wpdb->replace( $this->table_mdc, array(
+							'attachment_id' => $attachment_id,
+							'filename'      => $filename,
+							'matches_count' => count( $matches ),
+							'matches_data'  => json_encode( $matches ),
+							'checked_at'    => current_time( 'mysql' )
+						) );
+						$offset++;
+					} catch ( Exception $e ) {
+						$this->log( "Error processing item $attachment_id: " . $e->getMessage(), 'error' );
+						$offset++;
+					}
+				}
+
+				// Intermediate Update progress & activity time
+				update_option( 'mdc_scan_progress', array( 'offset' => $offset, 'total' => $progress['total'] ) );
+				update_option( 'mdc_last_batch_time', time() );
 			}
 
-			// Update progress
-			$new_offset = $offset + count( $items );
-			update_option( 'mdc_scan_progress', array( 'offset' => $new_offset, 'total' => $progress['total'] ) );
-
-			if ( $new_offset < $progress['total'] ) {
+			// Window closed, reschedule next one if needed
+			if ( $offset < $progress['total'] ) {
+				$this->log( "Time window closed. Current offset: $offset. Re-queuing...", 'info' );
 				wp_schedule_single_event( time() + 1, 'mdc_cron_batch' );
 			} else {
-				$this->log( "Scan complete. Processed $new_offset items.", 'success' );
+				$this->log( "Scan complete. Total processed: $offset", 'success' );
 				update_option( 'mdc_scan_status', 'idle' );
 			}
+
 		} catch ( Exception $e ) {
-			$this->log( "Batch Level Error: " . $e->getMessage(), 'error' );
-			// Wait a bit and try again
+			$this->log( "Critical Worker Error: " . $e->getMessage(), 'error' );
+			// Wait 5 seconds and try to recover
 			wp_schedule_single_event( time() + 5, 'mdc_cron_batch' );
 		}
 	}
